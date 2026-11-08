@@ -1,0 +1,152 @@
+PROJECT OVERVIEW
+
+1. PROJECT PURPOSE
+- What this project does: This project captures real-time hand movements using a webcam and translates them into live 3D animations of a hand model in Blender.
+- Expected input and output: 
+  - Input: Live video feed from a webcam showing a human hand.
+  - Output: A 3D rigged hand model in Blender moving in sync with the physical hand.
+- End goal of the system: To create an affordable, markerless motion capture system for hand animation and control in 3D environments.
+- Example workflow from start to finish:
+  1. The user opens the Blender file containing the rigged hand model and starts the receiver script.
+  2. The user runs the Python tracking script (`hand_full_control.py` or similar).
+  3. The webcam turns on and MediaPipe starts detecting the user's hand.
+  4. The Python script calculates 3D coordinates for each joint and finger tip.
+  5. These coordinates are sent continuously over a local network (UDP/TCP) to Blender.
+  6. The Blender script updates the positions of target "Empties".
+  7. Inverse Kinematics (IK) constraints on the 3D hand bones force the mesh to follow these Empties, animating the hand in real-time.
+
+2. HIGH-LEVEL ARCHITECTURE
+The system operates as a continuous pipeline with two main parallel processes:
+Camera → Detection → Processing → Data Transfer → Reception (Blender) → IK Solving (Blender) → Animation (Blender)
+
+- Camera: OpenCV captures video frames from the standard webcam.
+- Detection: MediaPipe analyzes the RGB frame and outputs 21 3D landmark points for the detected hand.
+- Processing: A Python script extracts the relevant landmarks, maps them to the corresponding bones of the 3D model, and packages the data into a JSON payload.
+- Data Transfer: The JSON data is serialized and transmitted via a UDP (or TCP in some versions) socket to localhost.
+- Reception (Blender): A Python script running inside Blender's application timer loop constantly listens for incoming socket data and parses the JSON.
+- IK Solving (Blender): The Blender script applies the received coordinates to 'Empty' objects in the 3D scene. 
+- Animation (Blender): The Armature's bones have Inverse Kinematics constraints targeting these Empties. When the Empties move, the bones automatically rotate to follow them, deforming the 3D mesh.
+
+3. FOLDER & FILE STRUCTURE
+- `hand_full_control.py` (Core): Main tracking script. Uses MediaPipe, maps landmarks to bones, and sends UDP data to Blender.
+- `hand_full_control_v4(points_ploting).py` (Core/Advanced): An advanced version of the tracker that sends raw point data instead of bone pairs, and includes commented-out Blender scripts for IK setup and data reception.
+- `src/hand_track.py` (Core): The Blender-side receiver script. It runs inside Blender, listens on UDP port 5004, normalizes the scale based on wrist-to-knuckle distance, applies smoothing to reduce jitter, and updates the IK target Empties.
+- `src/mediapipe_server.py` (Core): A clean version of the standalone Python tracking server sending to UDP port 5004.
+- `src/IK constraints.py` (Utility): A Blender script used to automatically assign Inverse Kinematics constraints to the armature bones, pointing them to their respective target Empties.
+- `src/frames.py` (Utility): A Blender script used to automatically generate the 'Empty' target objects at the correct joint locations based on the armature.
+- `plot.py` (Optional): A standalone visualizer that uses Matplotlib to plot the MediaPipe 3D hand landmarks in real-time without needing Blender. Good for debugging tracking independent of networking.
+- `rotation.py` (Optional/Deprecated): An early experiment calculating angles between specific fingers (thumb, index, middle) instead of full 3D coordinates.
+- `v1.py` / `hand_full_control_v2.py` / `hand_full_control_v3.py` (Deprecated): Older iterations of the tracking system using different socket methods (TCP instead of UDP) or data structures.
+- `shared_memory/read_write.py` (Optional): Experimental script to dump MediaPipe landmark data to a local JSON file (`landmarks.json`) instead of using sockets.
+- `hand.blend` / `human-hand-with-rig.blend` / `testing.blend`: The Blender workspace files containing the rigged 3D models and materials.
+
+4. DEPENDENCIES & SETUP
+- Programming language(s): Python 3.x
+- Required libraries/frameworks (External): 
+  - `opencv-python` (cv2)
+  - `mediapipe`
+  - `matplotlib` (only for `plot.py`)
+- Required libraries (Built-in): `socket`, `json`, `math`, `time`
+- Environment requirements: A standard Python environment for the tracker, and a Blender installation (which brings its own bundled Python environment `bpy`).
+- Installation commands: `pip install opencv-python mediapipe matplotlib`
+- GPU requirements: None strictly required for MediaPipe hand tracking, though a GPU will accelerate Blender rendering.
+
+5. EXECUTION FLOW
+- Entry points: You must run the Blender receiver script inside Blender AND the external Python tracker script.
+- What runs first: Start the Blender receiver script first so the socket is open and listening.
+- Function call flow (Tracker): 
+  1. `check_connection()`: Pings Blender to ensure it's listening.
+  2. `cap.read()`: Grabs a frame.
+  3. `hands.process()`: MediaPipe analyzes the frame.
+  4. Loops through `mp_hands.HandLandmark` and creates a dictionary of x,y,z coordinates.
+  5. `sock.sendto()`: Sends JSON to Blender.
+- Function call flow (Blender):
+  1. `store_initial_bone_lengths()`: Saves default bone sizes.
+  2. `receive_data()`: Bound to `bpy.app.timers`. Checks for socket data every 0.1s.
+  3. Calculates `scale_factor` based on distance from WRIST to MIDDLE_FINGER_MCP.
+  4. Normalizes and smooths the incoming coordinates using `lerp`.
+  5. Applies coordinates to target Empties (`target_empty.location = smoothed_pos`).
+
+6. IMPORTANT FUNCTIONS / CLASSES
+- `receive_data()` (in `src/hand_track.py`)
+  - Purpose: Non-blocking listener for UDP data inside Blender.
+  - Inputs: None (reads from global `sock`).
+  - Outputs: Returns float `0.1` (tells Blender's timer when to run it again).
+  - Dependencies: `socket`, `json`, `bpy`, `mathutils.Vector`.
+- `hands.process()` (in Tracker scripts)
+  - Purpose: MediaPipe's core inference function.
+  - Inputs: RGB image frame.
+  - Outputs: `results` object containing `.multi_hand_landmarks`.
+- `update_plot()` (in `plot.py`)
+  - Purpose: Refreshes the Matplotlib 3D graph.
+  - Inputs: List of 3D tuples (landmarks), List of index pairs (connections).
+  - Outputs: None (updates UI).
+
+7. AI / COMPUTER VISION COMPONENTS
+- Models used: Google MediaPipe Hands (a lightweight ML pipeline consisting of a palm detection model and a hand landmark model).
+- Landmark detection: Detects 21 3D landmarks (x, y, z).
+- Coordinate systems: 
+  - MediaPipe outputs normalized (0.0 to 1.0) X and Y screen coordinates, and an estimated relative Z depth.
+  - The Blender script converts these by mapping MediaPipe's X to Blender's X, MediaPipe's Z to Blender's Y, and MediaPipe's Y (inverted) to Blender's Z.
+- Transformations: Because human hands vary in size, the Blender script calculates a `scale_factor` by measuring the live distance between the wrist and the middle finger knuckle, comparing it to a constant `REFERENCE_DISTANCE`.
+
+8. BLENDER INTEGRATION
+- How Blender receives data: A non-blocking UDP socket (`socket.SOCK_DGRAM`) bound to `127.0.0.1:5004`. Blender's `bpy.app.timers.register()` loops the check function continuously without freezing the UI.
+- Rigging/armature mapping: The bones are mapped 1:1 with MediaPipe landmarks (e.g., "INDEX_FINGER_TIP").
+- Bone transformations: Bones are NOT rotated directly via script. Instead, target objects (Empties) are moved.
+- Animation pipeline: The armature utilizes Inverse Kinematics (IK) constraints. When an Empty moves, the IK solver calculates the necessary joint rotations for the finger bones to reach that Empty.
+
+9. CURRENT PROJECT STATUS
+- Working components: Real-time hand detection, socket communication, IK target positioning, basic smoothing algorithm (`SMOOTHING_FACTOR`).
+- Incomplete features: Handling multiple hands simultaneously (currently limited to `max_num_hands=1` in the main script). Depth accuracy (Z-axis in single-camera setups is always an estimation).
+- Bugs/Issues: 
+  - The Blender script runs at a fixed 0.1s interval (10 FPS), which causes a bottleneck and choppy animation compared to webcam framerates (30/60 FPS).
+  - TCP implementations (v1, v2) block execution and crash if connection is lost. The UDP implementation (v4/mediapipe_server) is better but lacks robust error recovery.
+- Likely unfinished sections: The file `hand_full_control_v4` contains massive blocks of commented-out Blender setup scripts, suggesting an attempt to automate the entire rig setup from the external Python script was started but abandoned.
+
+10. HOW TO RUN THE PROJECT
+1. Open Blender and load the target `.blend` file (e.g., `human-hand-with-rig.blend`).
+2. Go to the Scripting tab in Blender, open `src/hand_track.py`, and click "Run Script". (Check the system console to ensure it prints "Blender script is running...").
+3. Open a terminal on your OS and activate your Python environment.
+4. Run `python src/mediapipe_server.py`.
+5. Your webcam should activate. Move your hand in front of the camera, and the 3D model in Blender should follow it.
+6. Press 'ESC' in the Python video window to cleanly stop transmission.
+
+11. DEBUGGING GUIDE
+- What breaks: "Connection refused" or silent failure to animate.
+  - Why: Port mismatch or Blender script isn't running. 
+  - Diagnose: Ensure `src/mediapipe_server.py` and `src/hand_track.py` use the exact same port (currently 5004). Ensure the Blender script is executed first.
+- What breaks: Fingers fly off in weird directions or the hand looks mangled.
+  - Why: Scale normalization failure or Z-axis depth confusion from MediaPipe.
+  - Diagnose: Keep your hand flat and parallel to the camera to reset the IK solver. Adjust `REFERENCE_DISTANCE` in the Blender script to match the 3D model's scale.
+- What breaks: Blender completely freezes.
+  - Why: Using a blocking socket (TCP) instead of non-blocking UDP, or infinite loop in the UI thread.
+  - Diagnose: Force quit Blender. Always use `sock.setblocking(False)` and `bpy.app.timers` for network listening in Blender.
+
+12. REQUIRED KNOWLEDGE TO UNDERSTAND THIS PROJECT
+- Beginner:
+  - Python basics
+  - JSON data structures
+- Intermediate:
+  - OpenCV video capture
+  - Sockets/Networking (UDP vs TCP, localhost, blocking vs non-blocking)
+  - Coordinate systems (Translating 2D screen space to 3D world space)
+- Advanced:
+  - MediaPipe API
+  - Blender API (`bpy`, application timers, context manipulation)
+  - Rigging concepts (Inverse Kinematics, Armatures, Bones, Empties)
+
+13. DEVELOPMENT ROADMAP
+Recommended learning and completion order for a new developer:
+1. Understand MediaPipe: Run `plot.py` and read MediaPipe documentation to understand how it spits out 21 points.
+2. Understand Networking: Look at how `mediapipe_server.py` packages those 21 points into JSON and sends them via UDP.
+3. Understand Blender Integration: Read `src/hand_track.py` to see how Blender receives the JSON asynchronously without freezing.
+4. Understand IK Rigging: Open the `.blend` file, manually move the 'Empties' around, and watch how the IK constraints force the bones to follow.
+5. Upgrade Task: Modify the Blender timer to run at 0.016s (60fps) instead of 0.1s for smoother animation.
+6. Upgrade Task: Implement a two-hand tracking system by modifying the JSON payload structure and duplicating the armature logic.
+
+14. SUMMARY FOR A NEW CONTRIBUTOR
+If you have 30 days to finish this project, your immediate focus should be on **stabilization and framerate**. The core proof-of-concept (camera to Blender pipeline) works. You should:
+1. Fix the Blender bottleneck: Change `return 0.1` in `receive_data` to a much lower value or link the update to Blender's frame-change handler (`bpy.app.handlers.frame_change_pre`) to achieve 30+ FPS animation.
+2. Clean up the codebase: Consolidate `hand_full_control_v4`, `v1`, `v2`, `v3` into a single, clean "Server" script.
+3. Improve tracking data: MediaPipe's Z-axis (depth) is famously jittery. Implement an Exponential Moving Average (EMA) or One Euro filter in Python before sending the data over the socket, rather than relying solely on the simple `lerp` currently implemented in Blender.
